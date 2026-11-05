@@ -1,0 +1,55 @@
+name: Sync upstream fork
+
+on:
+  workflow_dispatch:
+  schedule:
+    # UTC; Asia/Shanghai: 02:17, 08:17, 14:17, 20:17.
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-fork
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'xht19980305/sub2api-sync' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Verify fork parent
+        shell: bash
+        run: |
+          set -euo pipefail
+          PARENT=$(gh api "repos/$REPOSITORY" --jq '.parent.full_name')
+          if [ "$PARENT" != 'Wei-Shaw/sub2api' ]; then
+            echo "Unexpected upstream: $PARENT" >&2
+            exit 1
+          fi
+
+      - name: Synchronize main using GitHub's fork merge API
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Unlike force-resetting a branch, merge-upstream preserves the local
+          # workflow commit. Conflicts fail the job and require manual review.
+          gh api --method POST "repos/$REPOSITORY/merge-upstream" \
+            -f branch=main --jq '.message' | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Confirm upstream commits are present
+        shell: bash
+        run: |
+          set -euo pipefail
+          UPSTREAM_SHA=$(gh api repos/Wei-Shaw/sub2api/commits/main --jq '.sha')
+          STATUS=$(gh api "repos/$REPOSITORY/compare/$UPSTREAM_SHA...main" --jq '.status')
+          echo "Upstream commit: $UPSTREAM_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "Fork comparison: $STATUS" >> "$GITHUB_STEP_SUMMARY"
+          case "$STATUS" in
+            identical|ahead) ;;
+            *) echo 'Upstream advanced during synchronization, or manual review is needed. Retry the job.' >&2; exit 1 ;;
+          esac
